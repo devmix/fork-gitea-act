@@ -524,6 +524,7 @@ func runPreStep(step actionStep) common.Executor {
 		logger.Debugf("run pre step for '%s'", step.getStepModel())
 
 		rc := step.getRunContext()
+		ghc := step.getGithubContext(ctx)
 		stepModel := step.getStepModel()
 		action := step.getActionModel()
 
@@ -536,7 +537,7 @@ func runPreStep(step actionStep) common.Executor {
 			var actionDir string
 			var actionPath string
 			if _, ok := step.(*stepActionRemote); ok {
-				actionPath = newRemoteAction(stepModel.Uses).Path
+				actionPath = newRemoteAction(ghc.ServerURL, stepModel.Uses).Path
 				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), stepModel.UsesHash())
 			} else {
 				actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
@@ -580,7 +581,7 @@ func runPreStep(step actionStep) common.Executor {
 			var actionDir string
 			var actionPath string
 			if _, ok := step.(*stepActionRemote); ok {
-				actionPath = newRemoteAction(stepModel.Uses).Path
+				actionPath = newRemoteAction(ghc.ServerURL, stepModel.Uses).Path
 				actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), stepModel.UsesHash())
 			} else {
 				actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
@@ -658,6 +659,7 @@ func runPostStep(step actionStep) common.Executor {
 		logger.Debugf("run post step for '%s'", step.getStepModel())
 
 		rc := step.getRunContext()
+		ghc := step.getGithubContext(ctx)
 		stepModel := step.getStepModel()
 		action := step.getActionModel()
 
@@ -665,7 +667,7 @@ func runPostStep(step actionStep) common.Executor {
 		var actionDir string
 		var actionPath string
 		if _, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
+			actionPath = newRemoteAction(ghc.ServerURL, stepModel.Uses).Path
 			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), stepModel.UsesHash())
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
