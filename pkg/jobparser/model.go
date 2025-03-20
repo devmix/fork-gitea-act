@@ -1,6 +1,7 @@
 package jobparser
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/nektos/act/pkg/model"
@@ -83,6 +84,7 @@ type Job struct {
 	Uses           string                    `yaml:"uses,omitempty"`
 	With           map[string]interface{}    `yaml:"with,omitempty"`
 	RawSecrets     yaml.Node                 `yaml:"secrets,omitempty"`
+	RawConcurrency *model.RawConcurrency     `yaml:"concurrency,omitempty"`
 	RawPermissions yaml.Node                 `yaml:"permissions,omitempty"`
 }
 
@@ -106,6 +108,7 @@ func (j *Job) Clone() *Job {
 		Uses:           j.Uses,
 		With:           j.With,
 		RawSecrets:     j.RawSecrets,
+		RawConcurrency: j.RawConcurrency,
 		RawPermissions: j.RawPermissions,
 	}
 }
@@ -175,10 +178,20 @@ type RunDefaults struct {
 	WorkingDirectory string `yaml:"working-directory,omitempty"`
 }
 
+type WorkflowDispatchInput struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Required    bool     `yaml:"required"`
+	Default     string   `yaml:"default"`
+	Type        string   `yaml:"type"`
+	Options     []string `yaml:"options"`
+}
+
 type Event struct {
 	Name      string
 	acts      map[string][]string
 	schedules []map[string]string
+	inputs    []WorkflowDispatchInput
 }
 
 func (evt *Event) IsSchedule() bool {
@@ -191,6 +204,114 @@ func (evt *Event) Acts() map[string][]string {
 
 func (evt *Event) Schedules() []map[string]string {
 	return evt.schedules
+}
+
+func (evt *Event) Inputs() []WorkflowDispatchInput {
+	return evt.inputs
+}
+
+func parseWorkflowDispatchInputs(inputs map[string]interface{}) ([]WorkflowDispatchInput, error) {
+	var results []WorkflowDispatchInput
+	for name, input := range inputs {
+		inputMap, ok := input.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid input: %v", input)
+		}
+		input := WorkflowDispatchInput{
+			Name: name,
+		}
+		if desc, ok := inputMap["description"].(string); ok {
+			input.Description = desc
+		}
+		if required, ok := inputMap["required"].(bool); ok {
+			input.Required = required
+		}
+		if defaultVal, ok := inputMap["default"].(string); ok {
+			input.Default = defaultVal
+		}
+		if inputType, ok := inputMap["type"].(string); ok {
+			input.Type = inputType
+		}
+		if options, ok := inputMap["options"].([]string); ok {
+			input.Options = options
+		} else if options, ok := inputMap["options"].([]interface{}); ok {
+			for _, option := range options {
+				if opt, ok := option.(string); ok {
+					input.Options = append(input.Options, opt)
+				}
+			}
+		}
+
+		results = append(results, input)
+	}
+	return results, nil
+}
+
+func ReadWorkflowRawConcurrency(content []byte) (*model.RawConcurrency, error) {
+	w := new(model.Workflow)
+	err := yaml.NewDecoder(bytes.NewReader(content)).Decode(w)
+	return w.RawConcurrency, err
+}
+
+func EvaluateConcurrency(rc *model.RawConcurrency, jobID string, job *Job, gitCtx map[string]any, results map[string]*JobResult, vars map[string]string, inputs map[string]any) (string, bool, error) {
+	actJob := &model.Job{}
+	if job != nil {
+		actJob.Strategy = &model.Strategy{
+			FailFastString:    job.Strategy.FailFastString,
+			MaxParallelString: job.Strategy.MaxParallelString,
+			RawMatrix:         job.Strategy.RawMatrix,
+		}
+		actJob.Strategy.FailFast = actJob.Strategy.GetFailFast()
+		actJob.Strategy.MaxParallel = actJob.Strategy.GetMaxParallel()
+	}
+
+	matrix := make(map[string]any)
+	matrixes, err := actJob.GetMatrixes()
+	if err != nil {
+		return "", false, err
+	}
+	if len(matrixes) > 0 {
+		matrix = matrixes[0]
+	}
+
+	evaluator := NewExpressionEvaluator(NewInterpeter(jobID, actJob, matrix, toGitContext(gitCtx), results, vars, inputs))
+	group := evaluator.Interpolate(rc.Group)
+	cancelInProgress := evaluator.Interpolate(rc.CancelInProgress)
+	return group, cancelInProgress == "true", nil
+}
+
+func toGitContext(input map[string]any) *model.GithubContext {
+	gitContext := &model.GithubContext{
+		EventPath:        asString(input["event_path"]),
+		Workflow:         asString(input["workflow"]),
+		RunID:            asString(input["run_id"]),
+		RunNumber:        asString(input["run_number"]),
+		Actor:            asString(input["actor"]),
+		Repository:       asString(input["repository"]),
+		EventName:        asString(input["event_name"]),
+		Sha:              asString(input["sha"]),
+		Ref:              asString(input["ref"]),
+		RefName:          asString(input["ref_name"]),
+		RefType:          asString(input["ref_type"]),
+		HeadRef:          asString(input["head_ref"]),
+		BaseRef:          asString(input["base_ref"]),
+		Token:            asString(input["token"]),
+		Workspace:        asString(input["workspace"]),
+		Action:           asString(input["action"]),
+		ActionPath:       asString(input["action_path"]),
+		ActionRef:        asString(input["action_ref"]),
+		ActionRepository: asString(input["action_repository"]),
+		Job:              asString(input["job"]),
+		RepositoryOwner:  asString(input["repository_owner"]),
+		RetentionDays:    asString(input["retention_days"]),
+	}
+
+	event, ok := input["event"].(map[string]any)
+	if ok {
+		gitContext.Event = event
+	}
+
+	return gitContext
 }
 
 func ParseRawOn(rawOn *yaml.Node) ([]*Event, error) {
@@ -221,79 +342,126 @@ func ParseRawOn(rawOn *yaml.Node) ([]*Event, error) {
 		}
 		return res, nil
 	case yaml.MappingNode:
-		events, triggers, err := parseMappingNode[interface{}](rawOn)
+		events, triggers, err := parseMappingNode[yaml.Node](rawOn)
 		if err != nil {
 			return nil, err
 		}
 		res := make([]*Event, 0, len(events))
 		for i, k := range events {
 			v := triggers[i]
-			if v == nil {
+			switch v.Kind {
+			case yaml.ScalarNode:
 				res = append(res, &Event{
 					Name: k,
-					acts: map[string][]string{},
 				})
-				continue
-			}
-			switch t := v.(type) {
-			case string:
-				res = append(res, &Event{
-					Name: k,
-					acts: map[string][]string{},
-				})
-			case []string:
-				res = append(res, &Event{
-					Name: k,
-					acts: map[string][]string{},
-				})
-			case map[string]interface{}:
-				acts := make(map[string][]string, len(t))
-				for act, branches := range t {
-					switch b := branches.(type) {
-					case string:
-						acts[act] = []string{b}
-					case []string:
-						acts[act] = b
-					case []interface{}:
-						acts[act] = make([]string, len(b))
-						for i, v := range b {
-							var ok bool
-							if acts[act][i], ok = v.(string); !ok {
-								return nil, fmt.Errorf("unknown on type: %#v", branches)
-							}
-						}
-					default:
-						return nil, fmt.Errorf("unknown on type: %#v", branches)
-					}
-				}
-				res = append(res, &Event{
-					Name: k,
-					acts: acts,
-				})
-			case []interface{}:
-				if k != "schedule" {
-					return nil, fmt.Errorf("unknown on type: %#v", v)
+			case yaml.SequenceNode:
+				var t []interface{}
+				err := v.Decode(&t)
+				if err != nil {
+					return nil, err
 				}
 				schedules := make([]map[string]string, len(t))
-				for i, tt := range t {
-					vv, ok := tt.(map[string]interface{})
-					if !ok {
-						return nil, fmt.Errorf("unknown on type: %#v", v)
-					}
-					schedules[i] = make(map[string]string, len(vv))
-					for k, vvv := range vv {
-						var ok bool
-						if schedules[i][k], ok = vvv.(string); !ok {
-							return nil, fmt.Errorf("unknown on type: %#v", v)
+				if k == "schedule" {
+					for i, tt := range t {
+						vv, ok := tt.(map[string]interface{})
+						if !ok {
+							return nil, fmt.Errorf("unknown on type(schedule): %#v", v)
+						}
+						schedules[i] = make(map[string]string, len(vv))
+						for k, vvv := range vv {
+							var ok bool
+							if schedules[i][k], ok = vvv.(string); !ok {
+								return nil, fmt.Errorf("unknown on type(schedule): %#v", v)
+							}
 						}
 					}
+				}
+
+				if len(schedules) == 0 {
+					schedules = nil
 				}
 				res = append(res, &Event{
 					Name:      k,
 					schedules: schedules,
 				})
+			case yaml.MappingNode:
+				acts := make(map[string][]string, len(v.Content)/2)
+				var inputs []WorkflowDispatchInput
+				expectedKey := true
+				var act string
+				for _, content := range v.Content {
+					if expectedKey {
+						if content.Kind != yaml.ScalarNode {
+							return nil, fmt.Errorf("key type not string: %#v", content)
+						}
+						act = ""
+						err := content.Decode(&act)
+						if err != nil {
+							return nil, err
+						}
+					} else {
+						switch content.Kind {
+						case yaml.SequenceNode:
+							var t []string
+							err := content.Decode(&t)
+							if err != nil {
+								return nil, err
+							}
+							acts[act] = t
+						case yaml.ScalarNode:
+							var t string
+							err := content.Decode(&t)
+							if err != nil {
+								return nil, err
+							}
+							acts[act] = []string{t}
+						case yaml.MappingNode:
+							if k != "workflow_dispatch" || act != "inputs" {
+								return nil, fmt.Errorf("map should only for workflow_dispatch but %s: %#v", act, content)
+							}
+
+							var key string
+							for i, vv := range content.Content {
+								if i%2 == 0 {
+									if vv.Kind != yaml.ScalarNode {
+										return nil, fmt.Errorf("key type not string: %#v", vv)
+									}
+									key = ""
+									if err := vv.Decode(&key); err != nil {
+										return nil, err
+									}
+								} else {
+									if vv.Kind != yaml.MappingNode {
+										return nil, fmt.Errorf("key type not map(%s): %#v", key, vv)
+									}
+
+									input := WorkflowDispatchInput{}
+									if err := vv.Decode(&input); err != nil {
+										return nil, err
+									}
+									input.Name = key
+									inputs = append(inputs, input)
+								}
+							}
+						default:
+							return nil, fmt.Errorf("unknown on type: %#v", content)
+						}
+					}
+					expectedKey = !expectedKey
+				}
+				if len(inputs) == 0 {
+					inputs = nil
+				}
+				if len(acts) == 0 {
+					acts = nil
+				}
+				res = append(res, &Event{
+					Name:   k,
+					acts:   acts,
+					inputs: inputs,
+				})
 			default:
-				return nil, fmt.Errorf("unknown on type: %#v", v)
+				return nil, fmt.Errorf("unknown on type: %v", v.Kind)
 			}
 		}
 		return res, nil
@@ -333,4 +501,13 @@ func parseMappingNode[T any](node *yaml.Node) ([]string, []T, error) {
 	}
 
 	return scalars, datas, nil
+}
+
+func asString(v interface{}) string {
+	if v == nil {
+		return ""
+	} else if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }

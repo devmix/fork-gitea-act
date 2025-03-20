@@ -1,6 +1,7 @@
 package model
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"reflect"
@@ -8,9 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nektos/act/pkg/common"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
+
+	"github.com/nektos/act/pkg/common"
 )
 
 // Workflow is the structure of the files in .github/workflows
@@ -21,6 +23,7 @@ type Workflow struct {
 	Env            map[string]string `yaml:"env"`
 	Jobs           map[string]*Job   `yaml:"jobs"`
 	Defaults       Defaults          `yaml:"defaults"`
+	RawConcurrency *RawConcurrency   `yaml:"concurrency"`
 	RawPermissions yaml.Node         `yaml:"permissions"`
 }
 
@@ -104,22 +107,40 @@ type WorkflowDispatch struct {
 }
 
 func (w *Workflow) WorkflowDispatchConfig() *WorkflowDispatch {
-	if w.RawOn.Kind != yaml.MappingNode {
+	switch w.RawOn.Kind {
+	case yaml.ScalarNode:
+		var val string
+		if !decodeNode(w.RawOn, &val) {
+			return nil
+		}
+		if val == "workflow_dispatch" {
+			return &WorkflowDispatch{}
+		}
+	case yaml.SequenceNode:
+		var val []string
+		if !decodeNode(w.RawOn, &val) {
+			return nil
+		}
+		for _, v := range val {
+			if v == "workflow_dispatch" {
+				return &WorkflowDispatch{}
+			}
+		}
+	case yaml.MappingNode:
+		var val map[string]yaml.Node
+		if !decodeNode(w.RawOn, &val) {
+			return nil
+		}
+
+		n, found := val["workflow_dispatch"]
+		var workflowDispatch WorkflowDispatch
+		if found && decodeNode(n, &workflowDispatch) {
+			return &workflowDispatch
+		}
+	default:
 		return nil
 	}
-
-	var val map[string]yaml.Node
-	if !decodeNode(w.RawOn, &val) {
-		return nil
-	}
-
-	var config WorkflowDispatch
-	node := val["workflow_dispatch"]
-	if !decodeNode(node, &config) {
-		return nil
-	}
-
-	return &config
+	return nil
 }
 
 type WorkflowCallInput struct {
@@ -301,15 +322,39 @@ func (j *Job) Needs() []string {
 // RunsOn list for Job
 func (j *Job) RunsOn() []string {
 	switch j.RawRunsOn.Kind {
+	case yaml.MappingNode:
+		var val struct {
+			Group  string
+			Labels yaml.Node
+		}
+
+		if !decodeNode(j.RawRunsOn, &val) {
+			return nil
+		}
+
+		labels := nodeAsStringSlice(val.Labels)
+
+		if val.Group != "" {
+			labels = append(labels, val.Group)
+		}
+
+		return labels
+	default:
+		return nodeAsStringSlice(j.RawRunsOn)
+	}
+}
+
+func nodeAsStringSlice(node yaml.Node) []string {
+	switch node.Kind {
 	case yaml.ScalarNode:
 		var val string
-		if !decodeNode(j.RawRunsOn, &val) {
+		if !decodeNode(node, &val) {
 			return nil
 		}
 		return []string{val}
 	case yaml.SequenceNode:
 		var val []string
-		if !decodeNode(j.RawRunsOn, &val) {
+		if !decodeNode(node, &val) {
 			return nil
 		}
 		return val
@@ -327,7 +372,7 @@ func environment(yml yaml.Node) map[string]string {
 	return env
 }
 
-// Environments returns string-based key=value map for a job
+// Environment returns string-based key=value map for a job
 func (j *Job) Environment() map[string]string {
 	return environment(j.Env)
 }
@@ -566,7 +611,7 @@ func (s *Step) String() string {
 	return s.ID
 }
 
-// Environments returns string-based key=value map for a step
+// Environment returns string-based key=value map for a step
 func (s *Step) Environment() map[string]string {
 	return environment(s.Env)
 }
@@ -676,6 +721,12 @@ func (s *Step) Type() StepType {
 	return StepTypeUsesActionRemote
 }
 
+// UsesHash returns a hash of the uses string.
+// For Gitea.
+func (s *Step) UsesHash() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(s.Uses)))
+}
+
 // ReadWorkflow returns a list of jobs for a given workflow file reader
 func ReadWorkflow(in io.Reader) (*Workflow, error) {
 	w := new(Workflow)
@@ -720,4 +771,11 @@ func decodeNode(node yaml.Node, out interface{}) bool {
 		return false
 	}
 	return true
+}
+
+// For Gitea
+// RawConcurrency represents a workflow concurrency or a job concurrency with uninterpolated options
+type RawConcurrency struct {
+	Group            string `yaml:"group,omitempty"`
+	CancelInProgress string `yaml:"cancel-in-progress,omitempty"`
 }

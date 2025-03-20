@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -53,9 +54,17 @@ func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {
 func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 	uses := rc.Run.Job().Uses
 
-	remoteReusableWorkflow := newRemoteReusableWorkflowWithPlat(rc.Config.GitHubInstance, uses)
-	if remoteReusableWorkflow == nil {
-		return common.NewErrorExecutor(fmt.Errorf("expected format {owner}/{repo}/.{git_platform}/workflows/{filename}@{ref}. Actual '%s' Input string was not in a correct format", uses))
+	var remoteReusableWorkflow *remoteReusableWorkflow
+	if strings.HasPrefix(uses, "http://") || strings.HasPrefix(uses, "https://") {
+		remoteReusableWorkflow = newRemoteReusableWorkflowFromAbsoluteURL(uses)
+		if remoteReusableWorkflow == nil {
+			return common.NewErrorExecutor(fmt.Errorf("expected format http(s)://{domain}/{owner}/{repo}/.{git_platform}/workflows/{filename}@{ref}. Actual '%s' Input string was not in a correct format", uses))
+		}
+	} else {
+		remoteReusableWorkflow = newRemoteReusableWorkflowWithPlat(rc.Config.GitHubInstance, uses)
+		if remoteReusableWorkflow == nil {
+			return common.NewErrorExecutor(fmt.Errorf("expected format {owner}/{repo}/.{git_platform}/workflows/{filename}@{ref}. Actual '%s' Input string was not in a correct format", uses))
+		}
 	}
 
 	// uses with safe filename makes the target directory look something like this {owner}-{repo}-.github-workflows-{filename}@{ref}
@@ -64,6 +73,10 @@ func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 	filename := fmt.Sprintf("%s/%s@%s", remoteReusableWorkflow.Org, remoteReusableWorkflow.Repo, remoteReusableWorkflow.Ref)
 	workflowDir := fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(filename))
 
+	if rc.Config.ActionCache != nil {
+		return newActionCacheReusableWorkflowExecutor(rc, filename, remoteReusableWorkflow)
+	}
+
 	// FIXME: if the reusable workflow is from a private repository, we need to provide a token to access the repository.
 	token := ""
 
@@ -71,6 +84,41 @@ func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 		newMutexExecutor(cloneIfRequired(rc, *remoteReusableWorkflow, workflowDir, token)),
 		newReusableWorkflowExecutor(rc, workflowDir, remoteReusableWorkflow.FilePath()),
 	)
+}
+
+func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, remoteReusableWorkflow *remoteReusableWorkflow) common.Executor {
+	return func(ctx context.Context) error {
+		ghctx := rc.getGithubContext(ctx)
+		remoteReusableWorkflow.URL = ghctx.ServerURL
+		sha, err := rc.Config.ActionCache.Fetch(ctx, filename, remoteReusableWorkflow.CloneURL(), remoteReusableWorkflow.Ref, ghctx.Token)
+		if err != nil {
+			return err
+		}
+		archive, err := rc.Config.ActionCache.GetTarArchive(ctx, filename, sha, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))
+		if err != nil {
+			return err
+		}
+		defer archive.Close()
+		treader := tar.NewReader(archive)
+		if _, err = treader.Next(); err != nil {
+			return err
+		}
+		planner, err := model.NewSingleWorkflowPlanner(remoteReusableWorkflow.Filename, treader)
+		if err != nil {
+			return err
+		}
+		plan, err := planner.PlanEvent("workflow_call")
+		if err != nil {
+			return err
+		}
+
+		runner, err := NewReusableWorkflowRunner(rc)
+		if err != nil {
+			return err
+		}
+
+		return runner.NewPlanExecutor(plan)(ctx)
+	}
 }
 
 var (
@@ -99,10 +147,11 @@ func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkfl
 			//	2. Gitea has already full URL with rc.Config.GitHubInstance when calling newRemoteReusableWorkflowWithPlat
 			// remoteReusableWorkflow.URL = rc.getGithubContext(ctx).ServerURL
 			return git.NewGitCloneExecutor(git.NewGitCloneExecutorInput{
-				URL:   remoteReusableWorkflow.CloneURL(),
-				Ref:   remoteReusableWorkflow.Ref,
-				Dir:   targetDirectory,
-				Token: token,
+				URL:         remoteReusableWorkflow.CloneURL(),
+				Ref:         remoteReusableWorkflow.Ref,
+				Dir:         targetDirectory,
+				Token:       token,
+				OfflineMode: rc.Config.ActionOfflineMode,
 			})(ctx)
 		},
 		nil,
@@ -126,7 +175,11 @@ func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow stri
 			return err
 		}
 
-		return runner.NewPlanExecutor(plan)(ctx)
+		// return runner.NewPlanExecutor(plan)(ctx)
+		return common.NewPipelineExecutor( // For Gitea
+			runner.NewPlanExecutor(plan),
+			setReusedWorkflowCallerResult(rc, runner),
+		)(ctx)
 	}
 }
 
@@ -136,6 +189,8 @@ func NewReusableWorkflowRunner(rc *RunContext) (Runner, error) {
 		eventJSON: rc.EventJSON,
 		caller: &caller{
 			runContext: rc,
+
+			reusedWorkflowJobResults: map[string]string{}, // For Gitea
 		},
 	}
 
@@ -185,6 +240,24 @@ func newRemoteReusableWorkflowWithPlat(url, uses string) *remoteReusableWorkflow
 	}
 }
 
+// For Gitea
+// newRemoteReusableWorkflowWithPlat create a `remoteReusableWorkflow` from an absolute url
+func newRemoteReusableWorkflowFromAbsoluteURL(uses string) *remoteReusableWorkflow {
+	r := regexp.MustCompile(`^(https?://.*)/([^/]+)/([^/]+)/\.([^/]+)/workflows/([^@]+)@(.*)$`)
+	matches := r.FindStringSubmatch(uses)
+	if len(matches) != 7 {
+		return nil
+	}
+	return &remoteReusableWorkflow{
+		URL:         matches[1],
+		Org:         matches[2],
+		Repo:        matches[3],
+		GitPlatform: matches[4],
+		Filename:    matches[5],
+		Ref:         matches[6],
+	}
+}
+
 // deprecated: use newRemoteReusableWorkflowWithPlat
 func newRemoteReusableWorkflow(uses string) *remoteReusableWorkflow {
 	// GitHub docs:
@@ -200,5 +273,49 @@ func newRemoteReusableWorkflow(uses string) *remoteReusableWorkflow {
 		Filename: matches[3],
 		Ref:      matches[4],
 		URL:      "https://github.com",
+	}
+}
+
+// For Gitea
+func setReusedWorkflowCallerResult(rc *RunContext, runner Runner) common.Executor {
+	return func(ctx context.Context) error {
+		logger := common.Logger(ctx)
+
+		runnerImpl, ok := runner.(*runnerImpl)
+		if !ok {
+			logger.Warn("Failed to get caller from runner")
+			return nil
+		}
+		caller := runnerImpl.caller
+
+		allJobDone := true
+		hasFailure := false
+		for _, result := range caller.reusedWorkflowJobResults {
+			if result == "pending" {
+				allJobDone = false
+				break
+			}
+			if result == "failure" {
+				hasFailure = true
+			}
+		}
+
+		if allJobDone {
+			reusedWorkflowJobResult := "success"
+			reusedWorkflowJobResultMessage := "succeeded"
+			if hasFailure {
+				reusedWorkflowJobResult = "failure"
+				reusedWorkflowJobResultMessage = "failed"
+			}
+
+			if rc.caller != nil {
+				rc.caller.setReusedWorkflowJobResult(rc.JobName, reusedWorkflowJobResult)
+			} else {
+				rc.result(reusedWorkflowJobResult)
+				logger.WithField("jobResult", reusedWorkflowJobResult).Infof("\U0001F3C1  Job %s", reusedWorkflowJobResultMessage)
+			}
+		}
+
+		return nil
 	}
 }

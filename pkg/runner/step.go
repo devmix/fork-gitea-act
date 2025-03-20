@@ -34,6 +34,9 @@ const (
 	stepStagePost
 )
 
+// Controls how many symlinks are resolved for local and remote Actions
+const maxSymlinkDepth = 10
+
 func (s stepStage) String() string {
 	switch s {
 	case stepStagePre:
@@ -118,6 +121,15 @@ func runStepExecutor(step step, stage stepStage, executor common.Executor) commo
 
 		summaryFileCommand := path.Join("workflow", "SUMMARY.md")
 		(*step.getEnv())["GITHUB_STEP_SUMMARY"] = path.Join(actPath, summaryFileCommand)
+
+		{
+			// For Gitea
+			(*step.getEnv())["GITEA_OUTPUT"] = (*step.getEnv())["GITHUB_OUTPUT"]
+			(*step.getEnv())["GITEA_STATE"] = (*step.getEnv())["GITHUB_STATE"]
+			(*step.getEnv())["GITEA_PATH"] = (*step.getEnv())["GITHUB_PATH"]
+			(*step.getEnv())["GITEA_ENV"] = (*step.getEnv())["GITHUB_ENV"]
+			(*step.getEnv())["GITEA_STEP_SUMMARY"] = (*step.getEnv())["GITHUB_STEP_SUMMARY"]
+		}
 
 		_ = rc.JobContainer.Copy(actPath, &container.FileEntry{
 			Name: outputFileCommand,
@@ -218,7 +230,8 @@ func setupEnv(ctx context.Context, step step) error {
 		}
 	}
 
-	common.Logger(ctx).Debugf("setupEnv => %v", *step.getEnv())
+	// For Gitea, reduce log noise
+	// common.Logger(ctx).Debugf("setupEnv => %v", *step.getEnv())
 
 	return nil
 }
@@ -306,4 +319,14 @@ func mergeIntoMapCaseInsensitive(target map[string]string, maps ...map[string]st
 			target[toKey(k)] = v
 		}
 	}
+}
+
+func symlinkJoin(filename, sym, parent string) (string, error) {
+	dir := path.Dir(filename)
+	dest := path.Join(dir, sym)
+	prefix := path.Clean(parent) + "/"
+	if strings.HasPrefix(dest, prefix) || prefix == "./" {
+		return dest, nil
+	}
+	return "", fmt.Errorf("symlink tries to access file '%s' outside of '%s'", strings.ReplaceAll(dest, "'", "''"), strings.ReplaceAll(parent, "'", "''"))
 }
