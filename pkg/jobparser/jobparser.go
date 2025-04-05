@@ -2,6 +2,7 @@ package jobparser
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -55,6 +56,9 @@ func Parse(content []byte, options ...ParseOption) ([]*SingleWorkflow, error) {
 			evaluator := NewExpressionEvaluator(NewInterpeter(id, origin.GetJob(id), matrix, pc.gitContext, results, pc.vars, nil))
 			job.Name = nameWithMatrix(job.Name, matrix, evaluator)
 			runsOn := origin.GetJob(id).RunsOn()
+			if len(runsOn) == 0 {
+				return nil, errors.New("empty runs-on")
+			}
 			for i, v := range runsOn {
 				runsOn[i] = evaluator.Interpolate(v)
 			}

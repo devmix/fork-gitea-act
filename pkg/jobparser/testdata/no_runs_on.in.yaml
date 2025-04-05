@@ -1,0 +1,6 @@
+name: test
+jobs:
+  job1:
+    name: job1
+    steps:
+      - run: echo job-1

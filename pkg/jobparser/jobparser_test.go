@@ -52,6 +52,11 @@ func TestParse(t *testing.T) {
 			options: nil,
 			wantErr: false,
 		},
+		{
+			name:    "no_runs_on",
+			options: nil,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,22 +65,23 @@ func TestParse(t *testing.T) {
 			got, err := Parse(content, tt.options...)
 			if tt.wantErr {
 				require.Error(t, err)
-			}
-			require.NoError(t, err)
+			} else {
+				require.NoError(t, err)
 
-			builder := &strings.Builder{}
-			for _, v := range got {
-				if builder.Len() > 0 {
-					builder.WriteString("---\n")
+				builder := &strings.Builder{}
+				for _, v := range got {
+					if builder.Len() > 0 {
+						builder.WriteString("---\n")
+					}
+					encoder := yaml.NewEncoder(builder)
+					encoder.SetIndent(2)
+					require.NoError(t, encoder.Encode(v))
+					id, job := v.Job()
+					assert.NotEmpty(t, id)
+					assert.NotNil(t, job)
 				}
-				encoder := yaml.NewEncoder(builder)
-				encoder.SetIndent(2)
-				require.NoError(t, encoder.Encode(v))
-				id, job := v.Job()
-				assert.NotEmpty(t, id)
-				assert.NotNil(t, job)
+				assert.Equal(t, string(want), builder.String())
 			}
-			assert.Equal(t, string(want), builder.String())
 		})
 	}
 }
