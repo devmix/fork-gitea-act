@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/nektos/act/pkg/exprparser"
 	"github.com/nektos/act/pkg/model"
 )
 
@@ -159,4 +160,30 @@ func matrixName(m map[string]interface{}) string {
 	}
 
 	return fmt.Sprintf("(%s)", strings.Join(vs, ", "))
+}
+
+func ParseRunName(content []byte, options ...ParseOption) (string, error) {
+	var data map[string]any
+	var value string
+
+	if err := yaml.Unmarshal(content, &data); err != nil {
+		return "", fmt.Errorf("yaml.Unmarshal: %w", err)
+	}
+
+	if v, ok := data["run-name"]; ok {
+		value = v.(string)
+	} else {
+		return "", fmt.Errorf("run-name not found in workflow")
+	}
+
+	pc := &parseContext{}
+	for _, o := range options {
+		o(pc)
+	}
+
+	i := exprparser.NewInterpeter(&exprparser.EvaluationEnvironment{Github: pc.gitContext}, exprparser.Config{})
+	e := NewExpressionEvaluator(i)
+	ret := e.Interpolate(value)
+
+	return ret, nil
 }
