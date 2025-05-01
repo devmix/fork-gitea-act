@@ -41,6 +41,10 @@ func Parse(content []byte, options ...ParseOption) ([]*SingleWorkflow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid jobs: %w", err)
 	}
+
+	evaluator := NewExpressionEvaluator(exprparser.NewInterpeter(&exprparser.EvaluationEnvironment{Github: pc.gitContext, Vars: pc.vars}, exprparser.Config{}))
+	workflow.RunName = evaluator.Interpolate(workflow.RunName)
+
 	for i, id := range ids {
 		job := jobs[i]
 		matricxes, err := getMatrixes(origin.GetJob(id))
@@ -160,30 +164,4 @@ func matrixName(m map[string]interface{}) string {
 	}
 
 	return fmt.Sprintf("(%s)", strings.Join(vs, ", "))
-}
-
-func ParseRunName(content []byte, options ...ParseOption) (string, error) {
-	var data map[string]any
-	var value string
-
-	if err := yaml.Unmarshal(content, &data); err != nil {
-		return "", fmt.Errorf("yaml.Unmarshal: %w", err)
-	}
-
-	if v, ok := data["run-name"]; ok {
-		value = v.(string)
-	} else {
-		return "", fmt.Errorf("run-name not found in workflow")
-	}
-
-	pc := &parseContext{}
-	for _, o := range options {
-		o(pc)
-	}
-
-	i := exprparser.NewInterpeter(&exprparser.EvaluationEnvironment{Github: pc.gitContext}, exprparser.Config{})
-	e := NewExpressionEvaluator(i)
-	ret := e.Interpolate(value)
-
-	return ret, nil
 }
