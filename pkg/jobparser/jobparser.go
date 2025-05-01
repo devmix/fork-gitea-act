@@ -70,6 +70,7 @@ func Parse(content []byte, options ...ParseOption) ([]*SingleWorkflow, error) {
 				Env:            workflow.Env,
 				Defaults:       workflow.Defaults,
 				RawPermissions: workflow.RawPermissions,
+				RunName:        workflow.RunName,
 			}
 			if err := swf.SetJob(id, job); err != nil {
 				return nil, fmt.Errorf("SetJob: %w", err)
