@@ -290,7 +290,7 @@ func EvaluateConcurrency(rc *model.RawConcurrency, jobID string, job *Job, gitCt
 	if evaluated.RawExpression != "" {
 		return evaluated.RawExpression, false, nil
 	}
-	return evaluated.CancelInProgress, evaluated.CancelInProgress == "true", nil
+	return evaluated.Group, evaluated.CancelInProgress == "true", nil
 }
 
 func toGitContext(input map[string]any) *model.GithubContext {
