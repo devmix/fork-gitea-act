@@ -81,6 +81,7 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 
 	router := httprouter.New()
 	router.GET(urlBase+"/cache", h.middleware(h.find))
+	router.GET(urlBase+"/caches", h.middleware(h.list))
 	router.POST(urlBase+"/caches", h.middleware(h.reserve))
 	router.PATCH(urlBase+"/caches/:id", h.middleware(h.upload))
 	router.POST(urlBase+"/caches/:id", h.middleware(h.commit))
@@ -338,6 +339,27 @@ func (h *Handler) clean(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 	// see: https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#force-deleting-cache-entries
 
 	h.responseJSON(w, r, 200)
+}
+
+// GET /_apis/artifactcache/caches
+func (h *Handler) list(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	db, err := h.openDB()
+	if err != nil {
+		h.responseJSON(w, r, 500, err)
+	}
+	defer db.Close()
+
+	getAll := bolthold.Query{}
+	var caches []Cache
+	err = db.ForEach(getAll.SortBy("CreatedAt").Reverse(), func(record *Cache) error {
+		caches = append(caches, *record)
+		return nil
+	})
+	if err != nil {
+		h.responseJSON(w, r, 500, fmt.Errorf("fail to list cache: %w", err))
+	}
+
+	h.responseJSON(w, r, 200, caches)
 }
 
 func (h *Handler) middleware(handler httprouter.Handle) httprouter.Handle {
