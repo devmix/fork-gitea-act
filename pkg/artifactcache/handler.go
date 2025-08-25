@@ -1,10 +1,12 @@
 package artifactcache
 
 import (
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +24,9 @@ import (
 
 	"github.com/nektos/act/pkg/common"
 )
+
+//go:embed dist/* swagger.yaml
+var swaggerFS embed.FS
 
 const (
 	urlBase = "/_apis/artifactcache"
@@ -79,7 +84,10 @@ func StartHandler(dir, outboundIP string, port uint16, logger logrus.FieldLogger
 		h.outboundIP = ip.String()
 	}
 
+	sub, _ := fs.Sub(swaggerFS, "dist")
 	router := httprouter.New()
+	router.ServeFiles("/swagger/*filepath", http.FS(sub))
+	router.GET("/swagger.yaml", h.swagger)
 	router.GET(urlBase+"/cache", h.middleware(h.find))
 	router.GET(urlBase+"/caches", h.middleware(h.list))
 	router.POST(urlBase+"/caches", h.middleware(h.reserve))
@@ -342,7 +350,7 @@ func (h *Handler) clean(w http.ResponseWriter, r *http.Request, _ httprouter.Par
 }
 
 // GET /_apis/artifactcache/caches
-func (h *Handler) list(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+func (h *Handler) list(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	db, err := h.openDB()
 	if err != nil {
 		h.responseJSON(w, r, 500, err)
@@ -559,6 +567,16 @@ func (h *Handler) responseJSON(w http.ResponseWriter, r *http.Request, code int,
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write(data)
+}
+
+func (h *Handler) swagger(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	data, err := swaggerFS.ReadFile("swagger.yaml")
+	if err != nil {
+		http.Error(w, "swagger.yaml not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/yaml")
+	w.Write(data)
 }
 
 func parseContentRange(s string) (int64, int64, error) {
