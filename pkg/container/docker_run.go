@@ -458,11 +458,18 @@ func (cr *containerReference) create(capAdd []string, capDrop []string) common.E
 
 		mounts := make([]mount.Mount, 0)
 		for mountSource, mountTarget := range input.Mounts {
-			mounts = append(mounts, mount.Mount{
-				Type:   mount.TypeVolume,
-				Source: mountSource,
-				Target: mountTarget,
-			})
+			if mountTarget.Type == mount.TypeTmpfs {
+				mounts = append(mounts, mount.Mount{
+					Type:   mountTarget.Type,
+					Target: mountTarget.Path,
+				})
+			} else {
+				mounts = append(mounts, mount.Mount{
+					Type:   mountTarget.Type,
+					Source: mountSource,
+					Target: mountTarget.Path,
+				})
+			}
 		}
 
 		var platSpecs *specs.Platform

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/go-connections/nat"
 	"github.com/opencontainers/selinux/go-selinux"
 
@@ -140,7 +141,7 @@ func getDockerDaemonSocketMountPath(daemonPath string) string {
 }
 
 // Returns the binds and mounts for the container, resolving paths as appopriate
-func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
+func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]container.MountOptions) {
 	name := rc.jobContainerName()
 
 	if rc.Config.ContainerDaemonSocket == "" {
@@ -155,21 +156,30 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 
 	ext := container.LinuxContainerEnvironmentExtensions{}
 
-	mounts := map[string]string{
-		"act-toolcache": "/opt/hostedtoolcache",
-		name + "-env":   ext.GetActPath(),
+	mounts := map[string]container.MountOptions{
+		"act-toolcache": container.MountOptions{
+			Path: "/opt/hostedtoolcache",
+			Type: mount.TypeVolume,
+		},
+		name + "-env": container.MountOptions{
+			Path: ext.GetActPath(),
+			Type: mount.TypeVolume,
+		},
 	}
 
 	if job := rc.Run.Job(); job != nil {
-		if container := job.Container(); container != nil {
-			for _, v := range container.Volumes {
+		if c := job.Container(); c != nil {
+			for _, v := range c.Volumes {
 				if !strings.Contains(v, ":") || filepath.IsAbs(v) {
 					// Bind anonymous volume or host file.
 					binds = append(binds, v)
 				} else {
 					// Mount existing volume.
 					paths := strings.SplitN(v, ":", 2)
-					mounts[paths[0]] = paths[1]
+					mounts[paths[0]] = container.MountOptions{
+						Path: paths[1],
+						Type: mount.TypeVolume,
+					}
 				}
 			}
 		}
@@ -185,7 +195,14 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]string) {
 		}
 		binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, ext.ToContainerPath(rc.Config.Workdir), bindModifiers))
 	} else {
-		mounts[name] = ext.ToContainerPath(rc.Config.Workdir)
+		mountType := mount.TypeVolume
+		if rc.Config.MountWorkdirAsTempfs {
+			mountType = mount.TypeTmpfs
+		}
+		mounts[name] = container.MountOptions{
+			Path: ext.ToContainerPath(rc.Config.Workdir),
+			Type: mountType,
+		}
 	}
 
 	// For Gitea
@@ -1157,7 +1174,7 @@ func (rc *RunContext) handleServiceCredentials(ctx context.Context, creds map[st
 }
 
 // GetServiceBindsAndMounts returns the binds and mounts for the service container, resolving paths as appopriate
-func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]string) {
+func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, map[string]container.MountOptions) {
 	if rc.Config.ContainerDaemonSocket == "" {
 		rc.Config.ContainerDaemonSocket = "/var/run/docker.sock"
 	}
@@ -1167,7 +1184,7 @@ func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, m
 		binds = append(binds, fmt.Sprintf("%s:%s", daemonPath, "/var/run/docker.sock"))
 	}
 
-	mounts := map[string]string{}
+	mounts := map[string]container.MountOptions{}
 
 	for _, v := range svcVolumes {
 		if !strings.Contains(v, ":") || filepath.IsAbs(v) {
@@ -1176,7 +1193,10 @@ func (rc *RunContext) GetServiceBindsAndMounts(svcVolumes []string) ([]string, m
 		} else {
 			// Mount existing volume.
 			paths := strings.SplitN(v, ":", 2)
-			mounts[paths[0]] = paths[1]
+			mounts[paths[0]] = container.MountOptions{
+				Path: paths[1],
+				Type: mount.TypeVolume,
+			}
 		}
 	}
 
