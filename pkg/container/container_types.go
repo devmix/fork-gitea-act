@@ -4,9 +4,15 @@ import (
 	"context"
 	"io"
 
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/go-connections/nat"
 	"github.com/nektos/act/pkg/common"
 )
+
+type MountOptions struct {
+	Path string
+	Type mount.Type
+}
 
 // NewContainerInput the input for the New function
 type NewContainerInput struct {
@@ -18,7 +24,7 @@ type NewContainerInput struct {
 	WorkingDir     string
 	Env            []string
 	Binds          []string
-	Mounts         map[string]string
+	Mounts         map[string]MountOptions
 	Name           string
 	Stdout         io.Writer
 	Stderr         io.Writer

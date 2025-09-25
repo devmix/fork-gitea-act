@@ -459,9 +459,9 @@ func (cr *containerReference) create(capAdd []string, capDrop []string) common.E
 		mounts := make([]mount.Mount, 0)
 		for mountSource, mountTarget := range input.Mounts {
 			mounts = append(mounts, mount.Mount{
-				Type:   mount.TypeVolume,
+				Type:   mountTarget.Type,
 				Source: mountSource,
-				Target: mountTarget,
+				Target: mountTarget.Path,
 			})
 		}
 
