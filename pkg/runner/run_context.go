@@ -196,12 +196,13 @@ func (rc *RunContext) GetBindsAndMounts() ([]string, map[string]container.MountO
 		binds = append(binds, fmt.Sprintf("%s:%s%s", rc.Config.Workdir, ext.ToContainerPath(rc.Config.Workdir), bindModifiers))
 	} else {
 		mountType := mount.TypeVolume
-		if rc.Config.MountWorkdirAsTempfs {
+		if rc.Config.WorkdirMountAsTempfs {
 			mountType = mount.TypeTmpfs
 		}
 		mounts[name] = container.MountOptions{
-			Path: ext.ToContainerPath(rc.Config.Workdir),
-			Type: mountType,
+			Path:         ext.ToContainerPath(rc.Config.Workdir),
+			Type:         mountType,
+			TmpfsOptions: rc.Config.WorkdirTempfsOptions,
 		}
 		rc.Config.ValidVolumes = append(rc.Config.ValidVolumes, name)
 	}

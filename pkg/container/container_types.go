@@ -10,8 +10,9 @@ import (
 )
 
 type MountOptions struct {
-	Path string
-	Type mount.Type
+	Path         string
+	Type         mount.Type
+	TmpfsOptions *[][]string
 }
 
 // NewContainerInput the input for the New function

@@ -28,7 +28,8 @@ type Config struct {
 	ActionCacheDir                     string                       // path used for caching action contents
 	ActionOfflineMode                  bool                         // when offline, use caching action contents
 	BindWorkdir                        bool                         // bind the workdir to the job container
-	MountWorkdirAsTempfs               bool                         // mount the workdir as the tempfs volume
+	WorkdirMountAsTempfs               bool                         // mount the workdir as the tempfs volume
+	WorkdirTempfsOptions               *[][]string                  // options for the workdir tempfs volume
 	EventName                          string                       // name of event to run
 	EventPath                          string                       // path to JSON file to use for event.json in containers
 	DefaultBranch                      string                       // name of the main branch for this repository
